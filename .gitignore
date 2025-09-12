@@ -1,0 +1,10 @@
+.vs
+dist
+node_modules
+release
+release/0.0.0
+./*.log
+./*.tsbuildinfo
+./.env
+./.env.local
+./.env.*.local
