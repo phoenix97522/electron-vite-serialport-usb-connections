@@ -118,27 +118,102 @@ ipcMain.handle("serial:open", async (event, opts) => {
   const { path: path2, baudRate = 9600 } = opts;
   if (openPorts.has(path2)) return { ok: true, message: "already open" };
   try {
-    const port = new SerialPort({ path: path2, baudRate, autoOpen: false });
-    const parser = port.pipe(new ReadlineParser_1({ delimiter: "\r\n" }));
-    parser.on("data", (line) => {
-      event.sender.send("serial:data", { path: path2, data: line });
+    console.log(`Opening port: ${path2} at ${baudRate} baud`);
+    const port = new SerialPort({
+      path: path2,
+      baudRate,
+      autoOpen: false,
+      dataBits: 8,
+      stopBits: 1,
+      parity: "none",
+      flowControl: false
+    });
+    console.log("Port created:", port);
+    let dataBuffer = Buffer.alloc(0);
+    let monitorInterval = null;
+    port.on("open", () => {
+      console.log(`Port ${path2} opened successfully`);
+      port.write(Buffer.from([5]));
+      console.log("Sent ENQ command to scale");
+      monitorInterval = setInterval(() => {
+        if (port.isOpen) {
+          port.write("W\r\n");
+        } else {
+          if (monitorInterval) {
+            clearInterval(monitorInterval);
+            monitorInterval = null;
+          }
+        }
+      }, 50);
+    });
+    port.on("data", (data) => {
+      const dataToStringHex = data.toString("hex");
+      const dataAsAscii = data.toString("ascii");
+      console.log(`Raw data from ${path2}:`, dataToStringHex, "|", dataAsAscii);
+      if (dataToStringHex === "453174") {
+        console.log("Received E1t response, sending ENQ command");
+        port.write(Buffer.from([5]));
+        return;
+      }
+      dataBuffer = Buffer.concat([dataBuffer, data]);
+      let startIndex = dataBuffer.indexOf(2);
+      let endIndex = dataBuffer.indexOf(3);
+      while (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
+        const messageBuffer = dataBuffer.slice(startIndex + 1, endIndex);
+        const messageString = messageBuffer.toString("ascii");
+        console.log(`Complete message from ${path2}:`, messageString);
+        const weight = parseScaleData(messageString);
+        if (weight !== null) {
+          console.log(`Parsed weight: ${weight} kg`);
+          event.sender.send("serial:data", { path: path2, data: weight.toString() });
+        }
+        dataBuffer = dataBuffer.slice(endIndex + 1);
+        startIndex = dataBuffer.indexOf(2);
+        endIndex = dataBuffer.indexOf(3);
+      }
+      if (dataBuffer.length > 100) {
+        dataBuffer = Buffer.alloc(0);
+      }
     });
     port.on("error", (err) => {
+      console.log(`Error from ${path2}:`, err.message);
       event.sender.send("serial:error", { path: path2, error: err.message });
     });
     port.on("close", () => {
+      console.log(`Closed port: ${path2}`);
+      if (monitorInterval) {
+        clearInterval(monitorInterval);
+        monitorInterval = null;
+      }
       event.sender.send("serial:closed", { path: path2 });
       openPorts.delete(path2);
     });
     await new Promise((resolve, reject) => {
       port.open((err) => err ? reject(err) : resolve());
     });
-    openPorts.set(path2, { port, parser });
+    openPorts.set(path2, { port, parser: null });
     return { ok: true };
   } catch (err) {
+    console.log("Error opening port:", err);
     return { ok: false, error: (err == null ? void 0 : err.message) ?? String(err) };
   }
 });
+function parseScaleData(stringData) {
+  console.log(`Parsing scale data: "${stringData}"`);
+  if (stringData === "E1t") {
+    console.log("Received E1t status code");
+    return null;
+  }
+  const weightMatch = stringData.match(/(-?\d+\.?\d*)/);
+  if (weightMatch) {
+    const weight = parseFloat(weightMatch[1]);
+    console.log(`Extracted weight: ${weight}`);
+    return weight;
+  } else {
+    console.log(`No numeric weight found in: "${stringData}"`);
+    return null;
+  }
+}
 ipcMain.handle("serial:close", async (_event, path2) => {
   const entry = openPorts.get(path2);
   if (!entry) return { ok: false, error: "not open" };
@@ -149,6 +224,80 @@ ipcMain.handle("serial:close", async (_event, path2) => {
     openPorts.delete(path2);
     return { ok: true };
   } catch (err) {
+    return { ok: false, error: (err == null ? void 0 : err.message) ?? String(err) };
+  }
+});
+ipcMain.handle("serial:test-baud-rates", async (event, path2) => {
+  const commonBaudRates = [9600, 1200, 2400, 4800, 19200, 38400, 57600, 115200];
+  const results = [];
+  for (const baudRate of commonBaudRates) {
+    try {
+      console.log(`Testing baud rate: ${baudRate}`);
+      const port = new SerialPort({
+        path: path2,
+        baudRate,
+        autoOpen: false,
+        dataBits: 8,
+        stopBits: 1,
+        parity: "none",
+        flowControl: false
+      });
+      let dataReceived = false;
+      let timeout;
+      const parser = port.pipe(new ReadlineParser_1({
+        delimiter: ["\r\n", "\r", "\n", "", ""],
+        includeDelimiter: false
+      }));
+      parser.on("data", (line) => {
+        console.log(`Data received at ${baudRate} baud:`, line);
+        dataReceived = true;
+        clearTimeout(timeout);
+        results.push({ baudRate, success: true, data: line });
+      });
+      port.on("error", (err) => {
+        console.log(`Error at ${baudRate} baud:`, err.message);
+        clearTimeout(timeout);
+      });
+      await new Promise((resolve, reject) => {
+        port.open((err) => err ? reject(err) : resolve());
+      });
+      await new Promise((resolve) => {
+        timeout = setTimeout(() => {
+          if (!dataReceived) {
+            results.push({ baudRate, success: false, data: null });
+          }
+          resolve();
+        }, 2e3);
+      });
+      await new Promise((resolve) => {
+        port.close((err) => resolve());
+      });
+    } catch (err) {
+      console.log(`Failed to test ${baudRate} baud:`, err);
+      results.push({ baudRate, success: false, error: err == null ? void 0 : err.message });
+    }
+  }
+  return { ok: true, results };
+});
+ipcMain.handle("serial:send-command", async (event, path2, command) => {
+  const entry = openPorts.get(path2);
+  if (!entry) return { ok: false, error: "Port not open" };
+  try {
+    console.log(`Sending command to ${path2}: ${JSON.stringify(command)}`);
+    await new Promise((resolve, reject) => {
+      entry.port.write(command, (err) => {
+        if (err) {
+          console.log(`Error sending command: ${err.message}`);
+          reject(err);
+        } else {
+          console.log(`Command sent successfully`);
+          resolve();
+        }
+      });
+    });
+    return { ok: true };
+  } catch (err) {
+    console.log(`Failed to send command: ${err.message}`);
     return { ok: false, error: (err == null ? void 0 : err.message) ?? String(err) };
   }
 });

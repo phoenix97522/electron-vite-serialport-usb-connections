@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld("serial", {
   list: () => ipcRenderer.invoke("serial:list"),
   open: (opts: any) => ipcRenderer.invoke("serial:open", opts),
   close: (path: string) => ipcRenderer.invoke("serial:close", path),
+  testBaudRates: (path: string) => ipcRenderer.invoke("serial:test-baud-rates", path),
+  sendCommand: (path: string, command: string) => ipcRenderer.invoke("serial:send-command", path, command),
 
   onData: (cb: (payload: { path: string; data: string }) => void) => {
     const listener = (_: IpcRendererEvent, payload: any) => cb(payload);

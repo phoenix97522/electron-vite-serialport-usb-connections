@@ -27,6 +27,8 @@ electron.contextBridge.exposeInMainWorld("serial", {
   list: () => electron.ipcRenderer.invoke("serial:list"),
   open: (opts) => electron.ipcRenderer.invoke("serial:open", opts),
   close: (path) => electron.ipcRenderer.invoke("serial:close", path),
+  testBaudRates: (path) => electron.ipcRenderer.invoke("serial:test-baud-rates", path),
+  sendCommand: (path, command) => electron.ipcRenderer.invoke("serial:send-command", path, command),
   onData: (cb) => {
     const listener = (_, payload) => cb(payload);
     electron.ipcRenderer.on("serial:data", listener);
